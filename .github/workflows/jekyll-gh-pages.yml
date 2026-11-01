@@ -1,0 +1,14 @@
+name: Legacy Jekyll Pages workflow (disabled)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  disabled:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain migration
+        run: echo "This legacy Jekyll workflow is disabled. Use .github/workflows/static.yml to build and deploy the Vite frontend."
