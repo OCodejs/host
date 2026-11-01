@@ -1,0 +1,16 @@
+node_modules/
+build/
+dist/
+.next/
+out/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+data/
+
+.velclawhost-tmp/
+deploy/generated/Caddyfile
+
+generated/

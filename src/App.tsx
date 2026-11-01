@@ -1,0 +1,878 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+  TabType, 
+  HostNode, 
+  MetricSnapshot, 
+  DnsRecord, 
+  SslInfo, 
+  SystemLog, 
+  SlowQuery, 
+  ApiKeyItem, 
+  AlertThresholds, 
+  SystemAlert,
+  TwoFactorState,
+  CustomDomain
+} from './types';
+import { 
+  INITIAL_NODES, 
+  INITIAL_SSL, 
+  INITIAL_DNS_RECORDS, 
+  INITIAL_THRESHOLDS, 
+  INITIAL_ALERTS, 
+  INITIAL_SLOW_QUERIES, 
+  INITIAL_API_KEYS, 
+  INITIAL_LOGS, 
+  INITIAL_CUSTOM_DOMAINS,
+  generateHistoricalMetrics 
+} from './mockData';
+import { generateBackupCodes, verifyTotpCode } from './utils/totp';
+import { downloadMetricsCsv, downloadLogsCsv } from './utils/csvExport';
+
+// Components
+import { Navbar } from './components/Navbar';
+import { Sidebar } from './components/Sidebar';
+import { OverviewTab } from './components/OverviewTab';
+import { DomainManagementTab } from './components/DomainManagementTab';
+import { DnsSslTab } from './components/DnsSslTab';
+import { ChartsTab } from './components/ChartsTab';
+import { AlertsTab } from './components/AlertsTab';
+import { LogsTab } from './components/LogsTab';
+import { DbOptimizationTab } from './components/DbOptimizationTab';
+import { SecurityTab } from './components/SecurityTab';
+import { ApiIntegrationTab } from './components/ApiIntegrationTab';
+import { ReportsModal } from './components/ReportsModal';
+import { FcmNotificationModal } from './components/FcmNotificationModal';
+import { VoiceAssistantModal } from './components/VoiceAssistantModal';
+import { DeploymentsTab } from './components/DeploymentsTab';
+import { DeveloperToolsTab } from './components/DeveloperToolsTab';
+
+import { 
+  LayoutDashboard, 
+  Globe, 
+  LineChart, 
+  BellRing, 
+  FileText, 
+  Database, 
+  ShieldCheck,
+  Bell,
+  Mic,
+  Rocket
+} from 'lucide-react';
+
+export default function App() {
+  // Theme state: dark mode default as requested for night-time eye comfort
+  const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('velclaw_theme');
+      return saved ? saved === 'dark' : true;
+    }
+    return true;
+  });
+
+  // Active navigation tab
+  const [activeTab, setActiveTab] = useState<TabType>(() => {
+    if (typeof window === 'undefined') return 'overview';
+    const hash = window.location.hash.replace('#/','');
+    const valid: TabType[] = ['overview','projects','deployments','domains','settings','dns-ssl','metrics-charts','alerts','db-optimizer','logs','security-2fa','api-integration','plugins-tools','reports'];
+    return valid.includes(hash as TabType) ? hash as TabType : 'overview';
+  });
+
+  const navigateTab = (tab: TabType) => {
+    setActiveTab(tab);
+    if (typeof window !== 'undefined') window.history.replaceState(null, '', `#/${tab}`);
+  };
+
+  // Nodes & Selection
+  const emptyNode: HostNode = { id: 'control-plane', hostname: 'loading', ipV4: 'container-local', ipV6: 'not-exposed', os: 'loading', kernel: 'loading', region: 'unknown', datacenter: 'unknown', status: 'online', uptimeSeconds: 0 };
+  const emptyMetric: MetricSnapshot = { timestamp: new Date(0).toISOString(), timeLabel: '--:--:--', cpuUsage: 0, cpuCores: [0], ramUsagePercent: 0, ramUsedGb: 0, ramTotalGb: 0, swapUsedGb: 0, swapTotalGb: 0, diskUsagePercent: 0, diskUsedGb: 0, diskTotalGb: 0, diskIops: 0, networkInMbps: 0, networkOutMbps: 0, load1m: 0, load5m: 0, load15m: 0, activeConnections: 0, latencyMs: 0 };
+  const [nodes, setNodes] = useState<HostNode[]>([emptyNode]);
+  const [selectedNode, setSelectedNode] = useState<HostNode>(emptyNode);
+  const [metrics, setMetrics] = useState<MetricSnapshot[]>([emptyMetric]);
+  const [isStreaming, setIsStreaming] = useState<boolean>(true);
+  const [capabilities, setCapabilities] = useState<{
+    mode: string;
+    containerRuntime: boolean;
+    deploymentBuild: boolean;
+    durableState: boolean;
+    dnsManagement: boolean;
+  } | null>(null);
+
+  // DNS & SSL
+  const [dnsRecords, setDnsRecords] = useState<DnsRecord[]>([]);
+  const [ssl, setSsl] = useState<SslInfo>({ domain: '', issuer: '', type: 'ECDSA', validFrom: 'pending', validTo: 'pending', daysRemaining: 0, tlsVersion: 'TLSv1.3', cipherSuite: 'pending', hstsEnabled: false, httpRedirectEnabled: false, autoRenew: false, fingerprint: 'pending', status: 'warning' });
+
+  // Custom Domains
+  const [customDomains, setCustomDomains] = useState<CustomDomain[]>([]);
+
+  // Thresholds & Alerts
+  const [thresholds, setThresholds] = useState<AlertThresholds>(INITIAL_THRESHOLDS);
+  const [alerts, setAlerts] = useState<SystemAlert[]>([]);
+
+  // Database Optimization
+  const [slowQueries, setSlowQueries] = useState<SlowQuery[]>([]);
+
+  // Event & Audit Logs
+  const [logs, setLogs] = useState<SystemLog[]>([]);
+
+  // API Keys
+  const [apiKeys, setApiKeys] = useState<ApiKeyItem[]>([]);
+
+  // 2FA / MFA Security State
+  const [twoFactor, setTwoFactor] = useState<TwoFactorState>({
+    enabled: false,
+    verified: false,
+    secret: '',
+    qrCodeText: '',
+    backupCodes: generateBackupCodes(8),
+    adminEmail: '',
+    lastVerifiedAt: undefined,
+  });
+
+  // Modals & Navigation
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [isReportsModalOpen, setIsReportsModalOpen] = useState(false);
+  const [isFcmModalOpen, setIsFcmModalOpen] = useState(false);
+  const [isVoiceAssistantOpen, setIsVoiceAssistantOpen] = useState(false);
+  const [toastNotification, setToastNotification] = useState<{ title: string; message: string; type: 'warn' | 'crit' | 'info' } | null>(null);
+
+  // Audio synthesizer for alert beep
+  const playAlertSound = () => {
+    if (typeof window === 'undefined') return;
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      gain.gain.setValueAtTime(0.15, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.3);
+    } catch {
+      // ignore audio context restrictions
+    }
+  };
+
+  // Sync theme with document class
+  useEffect(() => {
+    if (isDarkMode) {
+      document.documentElement.classList.add('dark');
+      localStorage.setItem('velclaw_theme', 'dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+      localStorage.setItem('velclaw_theme', 'light');
+    }
+  }, [isDarkMode]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/v1/capabilities', { cache: 'no-store' })
+      .then(async (response) => {
+        if (!response.ok) throw new Error('Capabilities API unavailable');
+        return response.json();
+      })
+      .then((payload) => {
+        if (!cancelled && payload.capabilities) {
+          setCapabilities({
+            mode: String(payload.mode || 'control-plane-only'),
+            containerRuntime: Boolean(payload.capabilities.containerRuntime),
+            deploymentBuild: Boolean(payload.capabilities.deploymentBuild),
+            durableState: Boolean(payload.capabilities.durableState),
+            dnsManagement: Boolean(payload.capabilities.dnsManagement),
+          });
+        }
+      })
+      .catch(() => { if (!cancelled) setCapabilities(null); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Load domains from the VelclawHost Control Plane instead of treating mock data as source of truth.
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/v1/domains')
+      .then(async (response) => {
+        if (!response.ok) throw new Error('Control Plane API unavailable');
+        return response.json();
+      })
+      .then((payload) => {
+        if (!cancelled && Array.isArray(payload.domains)) setCustomDomains(payload.domains as CustomDomain[]);
+      })
+      .catch(() => {
+        if (!cancelled) setCustomDomains([]);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = async () => {
+      try {
+        const response = await fetch('/api/v1/metrics', { cache: 'no-store' });
+        if (!response.ok) throw new Error('Control Plane metrics unavailable');
+        const payload = await response.json();
+        if (cancelled || !payload.snapshot) return;
+        setMetrics((prev) => [...prev.slice(-24), payload.snapshot as MetricSnapshot]);
+        if (payload.node) {
+          setNodes([payload.node as HostNode]);
+          setSelectedNode(payload.node as HostNode);
+        }
+      } catch {
+      } finally {
+        if (!cancelled) timer = setTimeout(poll, 3000);
+      }
+    };
+    void poll();
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, [isStreaming]);
+
+  // Trigger automated alert
+  const triggerThresholdAlert = (
+    type: SystemAlert['type'],
+    severity: SystemAlert['severity'],
+    title: string,
+    value: number,
+    threshold: number
+  ) => {
+    // avoid duplicate rapid spam
+    setAlerts((prevAlerts) => {
+      const existing = prevAlerts.find(a => !a.resolved && a.type === type);
+      if (existing) return prevAlerts;
+
+      const now = new Date();
+      const timeStr = `Hôm nay, ${now.toLocaleTimeString('vi-VN')}`;
+
+      const newAlert: SystemAlert = {
+        id: `alt-${Date.now()}`,
+        type,
+        severity,
+        title,
+        message: `Hệ thống tự động phát hiện node ${selectedNode.hostname} chạm ngưỡng giới hạn. Kích hoạt FCM Push Notification & ghi log bảo trì.`,
+        timestamp: timeStr,
+        value,
+        threshold,
+        resolved: false,
+      };
+
+      // Sound
+      if (thresholds.soundAlert) {
+        playAlertSound();
+      }
+
+      // Native browser notification if enabled
+      if (thresholds.notifyFCM && typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+        try {
+          new Notification(title, {
+            body: `Giá trị: ${value}% trên máy chủ ${selectedNode.hostname}`,
+            icon: '/favicon.ico',
+          });
+        } catch {
+          // ignore
+        }
+      }
+
+      // In-app toast banner
+      setToastNotification({
+        title,
+        message: `Tự động thông báo qua FCM và Webhook tới quản trị viên.`,
+        type: severity === 'critical' ? 'crit' : 'warn',
+      });
+      setTimeout(() => setToastNotification(null), 5000);
+
+      // Append log entry
+      setLogs((prevLogs) => [
+        {
+          id: `log-${Date.now()}`,
+          timestamp: now.toISOString().replace('T', ' ').slice(0, 19),
+          level: 'CRITICAL',
+          category: 'SYSTEM',
+          message: `[AUTO-ALERT TRIGGERED] ${title} trên host ${selectedNode.hostname}.`,
+          source: 'kernel-watchdog-daemon',
+          ip: selectedNode.ipV4,
+        },
+        ...prevLogs,
+      ]);
+
+      return [newAlert, ...prevAlerts];
+    });
+  };
+
+  // Simulate CPU Spike (for user testing)
+  const handleSimulateCpuSpike = () => {
+    setMetrics((prev) => {
+      const copy = [...prev];
+      const last = copy[copy.length - 1];
+      const spikeCpu = 92.4;
+      copy[copy.length - 1] = {
+        ...last,
+        cpuUsage: spikeCpu,
+        cpuCores: [94.1, 91.8, 93.0, 90.7],
+      };
+      return copy;
+    });
+
+    triggerThresholdAlert(
+      'CPU_HIGH',
+      'critical',
+      'Cảnh báo đột biến CPU: 92.4% chạm ngưỡng nguy hiểm!',
+      92.4,
+      thresholds.cpuCritical
+    );
+  };
+
+  // Simulate RAM Spike (for user testing)
+  const handleSimulateRamSpike = () => {
+    setMetrics((prev) => {
+      const copy = [...prev];
+      const last = copy[copy.length - 1];
+      const spikeRam = 14.8;
+      const spikePct = 92.5;
+      copy[copy.length - 1] = {
+        ...last,
+        ramUsedGb: spikeRam,
+        ramUsagePercent: spikePct,
+      };
+      return copy;
+    });
+
+    triggerThresholdAlert(
+      'RAM_HIGH',
+      'critical',
+      'Cảnh báo đột biến RAM: 92.5% (14.8 / 16.0 GB)!',
+      92.5,
+      thresholds.ramCritical
+    );
+  };
+
+  // Alert resolve action
+  const handleResolveAlert = (id: string) => {
+    setAlerts((prev) =>
+      prev.map((a) => (a.id === id ? { ...a, resolved: true, resolvedAt: new Date().toLocaleTimeString('vi-VN') } : a))
+    );
+  };
+
+  const handleClearResolvedAlerts = () => {
+    setAlerts((prev) => prev.filter((a) => !a.resolved));
+  };
+
+  // DNS handlers
+  const handleAddDnsRecord = (rec: Omit<DnsRecord, 'id' | 'status'>) => {
+    const newRec: DnsRecord = {
+      ...rec,
+      id: `dns-${Date.now()}`,
+      status: 'active',
+    };
+    setDnsRecords((prev) => [...prev, newRec]);
+    setLogs((prev) => [
+      {
+        id: `log-${Date.now()}`,
+        timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+        level: 'INFO',
+        category: 'DNS',
+        message: `Đã tạo bản ghi DNS mới ${newRec.type} ${newRec.name} -> ${newRec.content} (TTL: ${newRec.ttl}s).`,
+        source: 'dns-manager',
+      },
+      ...prev,
+    ]);
+  };
+
+  const handleToggleProxy = (id: string) => {
+    setDnsRecords((prev) =>
+      prev.map((r) => (r.id === id ? { ...r, proxied: !r.proxied } : r))
+    );
+  };
+
+  const handleDeleteDnsRecord = (id: string) => {
+    setDnsRecords((prev) => prev.filter((r) => r.id !== id));
+  };
+
+  // Custom Domain Handlers
+  const handleAddCustomDomain = async (domain: Omit<CustomDomain, 'id' | 'createdAt'>) => {
+    const response = await fetch('/api/v1/domains', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(domain),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || 'Không thể tạo domain');
+    const created = payload.domain as CustomDomain;
+    setCustomDomains((prev) => [created, ...prev]);
+    setLogs((prev) => [{
+      id: `log-${Date.now()}`,
+      timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+      level: 'INFO',
+      category: 'DNS',
+      message: `Đã tạo domain ${created.domain} trên VelclawHost Control Plane (${created.recordType} -> ${created.targetValue}).`,
+      source: 'velclawhost-api',
+    }, ...prev]);
+  };
+
+  const handleDeleteCustomDomain = async (id: string) => {
+    const target = customDomains.find((d) => d.id === id);
+    const response = await fetch(`/api/v1/domains/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!response.ok && response.status !== 404) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || 'Không thể xóa domain');
+    }
+    setCustomDomains((prev) => prev.filter((d) => d.id !== id));
+    if (target) {
+      setLogs((prev) => [{
+        id: `log-${Date.now()}`,
+        timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+        level: 'WARN',
+        category: 'DNS',
+        message: `Đã gỡ domain ${target.domain} khỏi VelclawHost Control Plane.`,
+        source: 'velclawhost-api',
+      }, ...prev]);
+    }
+  };
+
+  const handleVerifyCustomDomain = async (id: string): Promise<boolean> => {
+    const response = await fetch(`/api/v1/domains/${encodeURIComponent(id)}/verify`, { method: 'POST' });
+    const payload = await response.json().catch(() => ({}));
+    const domainObj = payload.domain as CustomDomain | undefined;
+    if (domainObj) setCustomDomains((prev) => prev.map((d) => d.id === id ? domainObj : d));
+    if (!response.ok) return false;
+    const verified = payload.status === 'verified';
+    if (domainObj) {
+      setLogs((prev) => [{
+        id: `log-${Date.now()}`,
+        timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+        level: verified ? 'INFO' : 'WARN',
+        category: 'DNS',
+        message: verified
+          ? `DNS verification thành công cho ${domainObj.domain}; trạng thái Control Plane chuyển sang active.`
+          : `DNS verification mismatch cho ${domainObj.domain}; kiểm tra lại record ${domainObj.recordType} -> ${domainObj.targetValue}.`,
+        source: 'velclawhost-dns-verifier',
+      }, ...prev]);
+    }
+    return verified;
+  };
+
+  // DB Query Optimization handlers
+  const handleOptimizeQuery = (id: string) => {
+    setSlowQueries((prev) =>
+      prev.map((q) => (q.id === id ? { ...q, optimized: true } : q))
+    );
+    setLogs((prev) => [
+      {
+        id: `log-${Date.now()}`,
+        timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+        level: 'INFO',
+        category: 'DATABASE',
+        message: `Chỉ mục cơ sở dữ liệu đã được khởi tạo thành công cho truy vấn ${id}. Thời gian phản hồi giảm còn ~9ms.`,
+        source: 'db-index-advisor',
+      },
+      ...prev,
+    ]);
+  };
+
+  const handleOptimizeAllQueries = () => {
+    setSlowQueries((prev) => prev.map((q) => ({ ...q, optimized: true })));
+    setLogs((prev) => [
+      {
+        id: `log-${Date.now()}`,
+        timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+        level: 'INFO',
+        category: 'DATABASE',
+        message: 'Hoàn tất tối ưu hóa toàn diện: Đã tạo Covering Indexes và cập nhật shared_buffers plan.',
+        source: 'db-optimizer-core',
+      },
+      ...prev,
+    ]);
+  };
+
+  // 2FA Verification
+  const handleVerifyTwoFactor = (code: string): boolean => {
+    const isValid = verifyTotpCode(code, twoFactor.secret);
+    if (isValid) {
+      setTwoFactor((prev) => ({
+        ...prev,
+        enabled: true,
+        verified: true,
+        lastVerifiedAt: new Date().toISOString(),
+      }));
+      setLogs((prev) => [
+        {
+          id: `log-${Date.now()}`,
+          timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+          level: 'INFO',
+          category: '2FA',
+          message: `Xác thực 2FA TOTP thành công cho quản trị viên ${twoFactor.adminEmail}.`,
+          source: 'mfa-guardian',
+          ip: '113.185.42.19',
+        },
+        ...prev,
+      ]);
+      return true;
+    }
+    return false;
+  };
+
+  const handleRegenerateBackupCodes = () => {
+    const newCodes = generateBackupCodes(8);
+    setTwoFactor((prev) => ({ ...prev, backupCodes: newCodes }));
+  };
+
+  // API Key handlers
+  const handleAddApiKey = (name: string, permissions: ApiKeyItem['permissions']) => {
+    const randPart = Math.random().toString(36).substring(2, 10);
+    const fullKey = `velclaw_live_${permissions.slice(0, 2)}_${randPart}8e93012bb81c9443f21`;
+    const newKey: ApiKeyItem = {
+      id: `key-${Date.now()}`,
+      name,
+      keyMasked: `velclaw_live_${randPart}••••••••••••••••`,
+      fullKey,
+      createdDate: new Date().toISOString().slice(0, 10),
+      lastUsed: 'Vừa tạo',
+      permissions,
+      status: 'active',
+    };
+    setApiKeys((prev) => [newKey, ...prev]);
+  };
+
+  const handleRevokeApiKey = (id: string) => {
+    setApiKeys((prev) => prev.filter((k) => k.id !== id));
+  };
+
+  // Trigger test FCM Push
+  const handleTriggerTestPush = (title: string, message: string) => {
+    triggerThresholdAlert('CPU_HIGH', 'warning', title, 87.2, thresholds.cpuWarning);
+  };
+
+  const currentMetric = metrics[metrics.length - 1] || metrics[0];
+  const unreadAlertsCount = alerts.filter((a) => !a.resolved).length;
+
+  return (
+    <div className={`vc-next-frame vc-app-shell min-h-screen transition-colors duration-200 ${isDarkMode ? 'bg-slate-950 text-slate-100' : 'bg-slate-100 text-slate-900'}`}>
+      {/* Toast Notification Banner (Floating) */}
+      {toastNotification && (
+        <div className="fixed top-20 right-4 z-50 max-w-md p-4 rounded-2xl bg-slate-900/95 border border-rose-500/50 shadow-2xl text-white flex items-start gap-3 animate-fade-in backdrop-blur-md">
+          <div className="p-2 rounded-xl bg-rose-500/20 text-rose-400 flex-shrink-0">
+            <Bell className="w-5 h-5" />
+          </div>
+          <div className="space-y-0.5 flex-1">
+            <div className="text-xs font-bold text-white flex items-center justify-between">
+              <span>{toastNotification.title}</span>
+              <span className="text-[10px] font-mono text-cyan-400 bg-cyan-500/10 px-1.5 py-0.5 rounded">FCM PUSH</span>
+            </div>
+            <p className="text-xs text-slate-300">{toastNotification.message}</p>
+          </div>
+          <button 
+            onClick={() => setToastNotification(null)}
+            className="text-slate-400 hover:text-white p-1"
+          >
+            &times;
+          </button>
+        </div>
+      )}
+
+      {/* Main Top Navigation */}
+      <Navbar
+        nodes={nodes}
+        selectedNode={selectedNode}
+        onSelectNode={setSelectedNode}
+        isDarkMode={isDarkMode}
+        onToggleTheme={() => setIsDarkMode(!isDarkMode)}
+        isTwoFactorActive={twoFactor.enabled && twoFactor.verified}
+        onOpenSecurityModal={() => navigateTab('security-2fa')}
+        onOpenFcmModal={() => setIsFcmModalOpen(true)}
+        onOpenVoiceAssistant={() => setIsVoiceAssistantOpen(true)}
+        alerts={alerts}
+        isMobileMenuOpen={isMobileMenuOpen}
+        onToggleMobileMenu={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+        onOpenDeployments={() => navigateTab('deployments')}
+      />
+
+      {/* Application Body */}
+      <div className="vc-next-layout vc-app-body">
+        {/* Left Sidebar */}
+        <Sidebar
+          activeTab={activeTab}
+          onSelectTab={navigateTab}
+          isMobileMenuOpen={isMobileMenuOpen}
+          onCloseMobileMenu={() => setIsMobileMenuOpen(false)}
+          unreadAlertCount={unreadAlertsCount}
+          onOpenVoiceAssistant={() => setIsVoiceAssistantOpen(true)}
+        />
+
+        {/* Main Content Viewport */}
+        <main className="vc-next-content vc-main min-w-0">
+          <div className="vc-page-header">
+            <div className="min-w-0">
+              <div className="vc-breadcrumb"><span>VelclawHost</span><span>/</span><span>Production</span><span>/</span><strong>{({
+                overview:'Overview', projects:'Projects', deployments:'Deployments', domains:'Domains', settings:'Settings', 'dns-ssl':'DNS & SSL',
+                'metrics-charts':'Analytics', alerts:'Alerts', logs:'Logs', 'db-optimizer':'Storage & Database',
+                'security-2fa':'Security', 'api-integration':'Integrations', 'plugins-tools':'Plugins & Tools', reports:'Usage & Reports'
+              } as Record<TabType,string>)[activeTab]}</strong></div>
+              <h1 className="vc-page-title">{({
+                overview:'Overview', projects:'Projects', deployments:'Deployments', domains:'Domains', settings:'Settings', 'dns-ssl':'DNS & SSL',
+                'metrics-charts':'Analytics', alerts:'Alerts', logs:'Logs', 'db-optimizer':'Storage & Database',
+                'security-2fa':'Security', 'api-integration':'Integrations', reports:'Usage & Reports'
+              } as Record<TabType,string>)[activeTab]}</h1>
+            </div>
+            <div className="vc-page-actions">
+              <span className="vc-live-pill"><i/> Production</span>
+            </div>
+          </div>
+          {capabilities && (
+            <div className={`mb-6 rounded-2xl border p-4 ${capabilities.mode === 'runtime-enabled' ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-amber-500/30 bg-amber-500/5'}`}>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs font-bold uppercase tracking-wider text-slate-300">VelclawHost Control Plane</div>
+                  <div className="mt-1 text-sm font-semibold text-white">
+                    {capabilities.mode === 'runtime-enabled' ? 'Runtime worker available' : 'Control-plane only — runtime worker chưa kết nối'}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2 text-[10px] font-mono">
+                  <span className="rounded-lg border border-slate-700 px-2 py-1 text-slate-300">Docker {capabilities.containerRuntime ? 'READY' : 'OFF'}</span>
+                  <span className="rounded-lg border border-slate-700 px-2 py-1 text-slate-300">Build {capabilities.deploymentBuild ? 'READY' : 'OFF'}</span>
+                  <span className="rounded-lg border border-slate-700 px-2 py-1 text-slate-300">Postgres {capabilities.durableState ? 'READY' : 'NOT CONNECTED'}</span>
+                  <span className="rounded-lg border border-slate-700 px-2 py-1 text-slate-300">Cloudflare API {capabilities.dnsManagement ? 'READY' : 'NOT CONNECTED'}</span>
+                </div>
+              </div>
+            </div>
+          )}
+          <div className="vc-next-container">
+          {activeTab === 'projects' && (
+            <section className="space-y-5">
+              <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div><h2 className="text-xl font-semibold text-white">Projects</h2><p className="mt-1 text-sm text-slate-400">Các dự án và ứng dụng được quản lý bởi VelclawHost.</p></div>
+                  <button onClick={() => navigateTab('deployments')} className="rounded-xl bg-cyan-600 px-4 py-2 text-sm font-semibold text-white">Xem deployments</button>
+                </div>
+              </div>
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                <article className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+                  <div className="mb-3 flex items-center gap-3"><div className="rounded-xl bg-cyan-500/10 p-3 text-cyan-300"><Globe className="h-5 w-5"/></div><div><h3 className="font-semibold text-white">VelclawHost</h3><p className="text-xs text-slate-400">Control plane</p></div></div>
+                  <p className="text-sm text-slate-400">Bảng điều khiển hạ tầng và quản lý tên miền.</p>
+                  <div className="mt-4 flex items-center justify-between"><span className="text-xs text-emerald-300">Ứng dụng hiện tại</span><a className="text-xs text-cyan-300 underline" href="https://velclawhost.onrender.com" target="_blank" rel="noreferrer">Mở ứng dụng</a></div>
+                </article>
+                <article className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+                  <div className="mb-3 flex items-center gap-3"><div className="rounded-xl bg-violet-500/10 p-3 text-violet-300"><Rocket className="h-5 w-5"/></div><div><h3 className="font-semibold text-white">Deployments</h3><p className="text-xs text-slate-400">Build & release</p></div></div>
+                  <p className="text-sm text-slate-400">Theo dõi trạng thái triển khai từ trang Deployments.</p>
+                  <button onClick={() => navigateTab('deployments')} className="mt-4 text-xs text-cyan-300 underline">Mở Deployments</button>
+                </article>
+              </div>
+            </section>
+          )}
+
+          {activeTab === 'settings' && (
+            <section className="space-y-5">
+              <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
+                <h2 className="text-xl font-semibold text-white">Settings</h2>
+                <p className="mt-1 text-sm text-slate-400">Cài đặt giao diện và tùy chọn bảng điều khiển.</p>
+              </div>
+              <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+                <div className="flex items-center justify-between gap-4"><div><h3 className="font-medium text-white">Giao diện</h3><p className="mt-1 text-sm text-slate-400">Chọn chế độ sáng hoặc tối; lựa chọn được lưu trên thiết bị này.</p></div><button onClick={() => setIsDarkMode(v => !v)} className="rounded-xl border border-slate-700 px-4 py-2 text-sm text-white">{isDarkMode ? 'Đang dùng tối · Chuyển sáng' : 'Đang dùng sáng · Chuyển tối'}</button></div>
+              </div>
+              <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+                <div className="flex items-center justify-between gap-4"><div><h3 className="font-medium text-white">Bảo mật</h3><p className="mt-1 text-sm text-slate-400">Trạng thái xác thực hai yếu tố.</p></div><span className={twoFactor.enabled && twoFactor.verified ? 'rounded-full bg-emerald-500/10 px-3 py-1 text-xs text-emerald-300' : 'rounded-full bg-amber-500/10 px-3 py-1 text-xs text-amber-300'}>{twoFactor.enabled && twoFactor.verified ? '2FA đang bật' : '2FA chưa xác minh'}</span></div>
+                <button onClick={() => navigateTab('security-2fa')} className="mt-4 rounded-xl border border-slate-700 px-4 py-2 text-sm text-white">Mở Security</button>
+              </div>
+              <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
+                <h3 className="font-medium text-white">Hạ tầng và DNS</h3><p className="mt-1 text-sm text-slate-400">Kiểm tra DNS & SSL riêng biệt; thay đổi nameserver chưa được bật ở dashboard.</p>
+                <button onClick={() => navigateTab('dns-ssl')} className="mt-4 rounded-xl border border-slate-700 px-4 py-2 text-sm text-white">Mở DNS & SSL</button>
+              </div>
+            </section>
+          )}
+
+          {activeTab === 'deployments' && <DeploymentsTab />}
+
+          {activeTab === 'overview' && (
+            <OverviewTab
+              node={selectedNode}
+              metric={currentMetric}
+              metrics={metrics}
+              ssl={ssl}
+              thresholds={thresholds}
+              alerts={alerts}
+              onSimulateSpike={handleSimulateCpuSpike}
+              onOpenReports={() => setIsReportsModalOpen(true)}
+              onOpenSecurity={() => navigateTab('security-2fa')}
+              onNavigateToCharts={() => navigateTab('metrics-charts')}
+              isTwoFactorActive={twoFactor.enabled && twoFactor.verified}
+            />
+          )}
+
+          {activeTab === 'domains' && (
+            <DomainManagementTab
+              customDomains={customDomains}
+              currentNodes={nodes}
+              onAddDomain={handleAddCustomDomain}
+              onDeleteDomain={handleDeleteCustomDomain}
+              onVerifyDomain={handleVerifyCustomDomain}
+            />
+          )}
+
+          {activeTab === 'dns-ssl' && (
+            <DnsSslTab
+              dnsRecords={dnsRecords}
+              ssl={ssl}
+              node={selectedNode}
+              onUpdateSsl={(updated) => setSsl((prev) => ({ ...prev, ...updated }))}
+              onAddDnsRecord={handleAddDnsRecord}
+              onToggleProxy={handleToggleProxy}
+              onDeleteDnsRecord={handleDeleteDnsRecord}
+            />
+          )}
+
+          {activeTab === 'metrics-charts' && (
+            <ChartsTab
+              metrics={metrics}
+              thresholds={thresholds}
+              isStreaming={isStreaming}
+              onToggleStreaming={() => setIsStreaming(!isStreaming)}
+            />
+          )}
+
+          {activeTab === 'alerts' && (
+            <AlertsTab
+              thresholds={thresholds}
+              alerts={alerts}
+              currentMetric={currentMetric}
+              onUpdateThresholds={(up) => setThresholds((prev) => ({ ...prev, ...up }))}
+              onSimulateCpuSpike={handleSimulateCpuSpike}
+              onSimulateRamSpike={handleSimulateRamSpike}
+              onResolveAlert={handleResolveAlert}
+              onClearResolvedAlerts={handleClearResolvedAlerts}
+            />
+          )}
+
+          {activeTab === 'logs' && (
+            <LogsTab
+              logs={logs}
+              alerts={alerts}
+              onAddLog={(log) =>
+                setLogs((prev) => [
+                  {
+                    ...log,
+                    id: `log-${Date.now()}`,
+                    timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19),
+                  },
+                  ...prev,
+                ])
+              }
+              onExportCsv={() => downloadLogsCsv(logs, alerts)}
+            />
+          )}
+
+          {activeTab === 'db-optimizer' && (
+            <DbOptimizationTab
+              queries={slowQueries}
+              onOptimizeQuery={handleOptimizeQuery}
+              onOptimizeAll={handleOptimizeAllQueries}
+            />
+          )}
+
+          {activeTab === 'security-2fa' && (
+            <SecurityTab
+              twoFactor={twoFactor}
+              onToggleTwoFactor={(en) => setTwoFactor((prev) => ({ ...prev, enabled: en }))}
+              onVerifyTwoFactor={handleVerifyTwoFactor}
+              onRegenerateBackupCodes={handleRegenerateBackupCodes}
+            />
+          )}
+
+          {activeTab === 'api-integration' && (
+            <ApiIntegrationTab
+              apiKeys={apiKeys}
+              currentMetric={currentMetric}
+              onAddApiKey={handleAddApiKey}
+              onRevokeApiKey={handleRevokeApiKey}
+            />
+          )}
+
+          {activeTab === 'plugins-tools' && <DeveloperToolsTab />}
+
+          {activeTab === 'reports' && (
+            <div className="space-y-6">
+              <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-between">
+                <div>
+                  <h2 className="text-xl font-bold text-white font-mono">Báo Cáo &amp; Xuất Dữ Liệu</h2>
+                  <p className="text-xs text-slate-400 mt-1">Xuất báo cáo PDF, CSV và lập lịch định kỳ</p>
+                </div>
+                <button
+                  onClick={() => setIsReportsModalOpen(true)}
+                  className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold"
+                >
+                  Mở Trình Xuất Báo Cáo
+                </button>
+              </div>
+
+              {/* Directly embedded modal view */}
+              <ReportsModal
+                isOpen={true}
+                onClose={() => navigateTab('overview')}
+                node={selectedNode}
+                metrics={metrics}
+                ssl={ssl}
+                thresholds={thresholds}
+                alerts={alerts}
+                logs={logs}
+                isTwoFactorActive={twoFactor.enabled && twoFactor.verified}
+              />
+            </div>
+          )}
+          </div>
+        </main>
+      </div>
+
+      {/* Mobile navigation uses the hamburger menu so each section stays on its own page. */}
+      {/* Floating Action Button for Voice Assistant */}
+      <button
+        id="floating-voice-assistant-fab"
+        onClick={() => setIsVoiceAssistantOpen(true)}
+        className="fixed bottom-18 sm:bottom-6 right-4 sm:right-6 z-40 p-3 sm:p-3.5 rounded-2xl bg-gradient-to-tr from-cyan-600 via-blue-600 to-indigo-600 text-white shadow-xl shadow-cyan-600/30 hover:scale-105 active:scale-95 transition-all border border-cyan-400/40 flex items-center gap-2 group"
+        title="Trợ lý Giọng nói AI (Gemini Live)"
+      >
+        <Mic className="w-5 h-5 group-hover:scale-110 transition-transform" />
+        <span className="hidden md:inline text-xs font-bold font-mono tracking-wide">
+          DevOps Voice AI
+        </span>
+      </button>
+
+      {/* Floating Modals */}
+      {isReportsModalOpen && activeTab !== 'reports' && (
+        <ReportsModal
+          isOpen={isReportsModalOpen}
+          onClose={() => setIsReportsModalOpen(false)}
+          node={selectedNode}
+          metrics={metrics}
+          ssl={ssl}
+          thresholds={thresholds}
+          alerts={alerts}
+          logs={logs}
+          isTwoFactorActive={twoFactor.enabled && twoFactor.verified}
+        />
+      )}
+
+      {isFcmModalOpen && (
+        <FcmNotificationModal
+          isOpen={isFcmModalOpen}
+          onClose={() => setIsFcmModalOpen(false)}
+          alerts={alerts}
+          onTriggerTestPush={handleTriggerTestPush}
+        />
+      )}
+
+      {isVoiceAssistantOpen && (
+        <VoiceAssistantModal
+          isOpen={isVoiceAssistantOpen}
+          onClose={() => setIsVoiceAssistantOpen(false)}
+          selectedNode={selectedNode}
+          currentMetric={currentMetric}
+          alerts={alerts}
+          isTwoFactorActive={twoFactor.enabled && twoFactor.verified}
+          onNavigateTab={(tab) => navigateTab(tab)}
+          onSimulateCpuSpike={handleSimulateCpuSpike}
+          onOpenReports={() => setIsReportsModalOpen(true)}
+        />
+      )}
+    </div>
+  );
+}
