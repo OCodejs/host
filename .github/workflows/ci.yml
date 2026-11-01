@@ -1,0 +1,27 @@
+name: VelclawHost CI
+
+on:
+  push:
+    branches: ["main", "feature/**"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4"
+
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+      - run: bun run build
+      - run: bun run worker:build
+      - run: docker build --tag velclawhost:ci .
+      - run: docker build --file runtime-worker/Dockerfile --tag velclawhost-runtime-worker:ci .
